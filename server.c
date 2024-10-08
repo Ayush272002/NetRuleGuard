@@ -276,33 +276,30 @@ int is_valid_port(int port) {
 int is_valid_rule(const char *rule) {
     char ip_range[256], port_range[256];
 
-    // This will handle both single IPs and ranges
     if (sscanf(rule, "%255s %255s", ip_range, port_range) != 2) {
-        return 0; // If the format isn't correct, return invalid
+        return 0; 
     }
 
-    // Check if the IP range is valid
     if (strchr(ip_range, '-')) {
         char ip_start[256], ip_end[256];
         sscanf(ip_range, "%255[^-]-%255s", ip_start, ip_end);
         if (!is_valid_ip(ip_start) || !is_valid_ip(ip_end)) {
-            return 0; // Invalid IP range
+            return 0; 
         }
     } else if (!is_valid_ip(ip_range)) {
-        return 0; // Invalid single IP
+        return 0; 
     }
 
-    // Check if the port range is valid
     if (strchr(port_range, '-')) {
         int port_start, port_end;
         sscanf(port_range, "%d-%d", &port_start, &port_end);
         if (!is_valid_port(port_start) || !is_valid_port(port_end)) {
-            return 0; // Invalid port range
+            return 0; 
         }
     } else if (!is_valid_port(atoi(port_range))) {
-        return 0; // Invalid single port
+        return 0; 
     }
 
-    return 1; // The rule is valid if it passes all checks
+    return 1; 
 }
 
