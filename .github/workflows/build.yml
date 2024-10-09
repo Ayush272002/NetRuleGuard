@@ -25,5 +25,11 @@ jobs:
       - name: Make test.sh executable
         run: chmod +x ./test.sh
 
+      - name: Make interative.sh executable
+        run: chmod +x ./interactive.sh
+
+      - name: Install valgrind
+        run: sudo apt-get install valgrind
+
       - name: Run tests
         run: ./test.sh
