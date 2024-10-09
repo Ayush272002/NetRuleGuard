@@ -103,6 +103,10 @@ void process_command(char *request) {
             break;
 
         case 'A':
+            if (strlen(arg) == 0) { 
+                printf("Illegal request\n");
+                break;
+            }
             if(is_valid_rule(arg) && add_rule(arg) == 0) {
                 printf("Rule added\n");
             } else {
@@ -114,7 +118,7 @@ void process_command(char *request) {
             char ip[256];
             int port;
             if(sscanf(arg, "%s %d", ip, &port) != 2) {
-                printf("Invalid command\n");
+                printf("Illegal request\n");
                 break;
             }
 
@@ -130,6 +134,10 @@ void process_command(char *request) {
         }
 
         case 'D':
+            if (strlen(arg) == 0) { 
+                printf("Illegal request\n");
+                break;
+            }
             if(is_valid_rule(arg) && delete_rule(arg)) {
                 printf("Rule deleted\n");
             } else {
@@ -283,7 +291,11 @@ int is_valid_rule(const char *rule) {
     if (strchr(ip_range, '-')) {
         char ip_start[256], ip_end[256];
         sscanf(ip_range, "%255[^-]-%255s", ip_start, ip_end);
-        if (!is_valid_ip(ip_start) || !is_valid_ip(ip_end)) {
+        
+        uint32_t start, end;
+        if (!is_valid_ip(ip_start) || !is_valid_ip(ip_end) || 
+            !ip_to_int(ip_start, &start) || !ip_to_int(ip_end, &end) || 
+            start > end) {
             return 0; 
         }
     } else if (!is_valid_ip(ip_range)) {
@@ -292,8 +304,9 @@ int is_valid_rule(const char *rule) {
 
     if (strchr(port_range, '-')) {
         int port_start, port_end;
-        sscanf(port_range, "%d-%d", &port_start, &port_end);
-        if (!is_valid_port(port_start) || !is_valid_port(port_end)) {
+        if (sscanf(port_range, "%d-%d", &port_start, &port_end) != 2 ||
+            !is_valid_port(port_start) || !is_valid_port(port_end) || 
+            port_start > port_end) {
             return 0; 
         }
     } else if (!is_valid_port(atoi(port_range))) {
@@ -302,4 +315,3 @@ int is_valid_rule(const char *rule) {
 
     return 1; 
 }
-
