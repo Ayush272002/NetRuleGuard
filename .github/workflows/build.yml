@@ -22,5 +22,8 @@ jobs:
       - name: Build project
         run: make all
       
+      - name: Make test.sh executable
+        run: chmod +x ./test.sh
+
       - name: Run tests
         run: ./test.sh
