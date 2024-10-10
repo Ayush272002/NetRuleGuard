@@ -28,11 +28,17 @@ jobs:
       - name: Make interative.sh executable
         run: chmod +x ./interactive.sh
 
+      - name: Make network.sh executable
+        run: chmod +x ./network.sh
+
       - name: Install valgrind
         run: sudo apt-get install valgrind
 
-      # - name: Run tests
-      #   run: ./test.sh
+      - name: Run tests
+        run: ./test.sh
 
       - name: Run interactive tests
         run: ./interactive.sh
+
+      - name: Run network tests
+        run: ./network.sh
