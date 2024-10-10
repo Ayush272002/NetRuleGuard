@@ -4,6 +4,11 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <arpa/inet.h> // For IP address conversion (inet_pton)
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <signal.h>
 
 #define BUFFER_SIZE 1024
 
@@ -29,55 +34,39 @@ typedef struct RequestNode
 RuleNode *rule_head = NULL;
 RequestNode *request_head = NULL;
 
+// Mutexes for thread safety
+pthread_mutex_t rule_mutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_mutex_t request_mutex = PTHREAD_MUTEX_INITIALIZER;
+
 // Function Prototypes
-void process_command(char *request);
-void list_requests(void);
+void process_command(char *request, int client_fd);
+void list_requests(int client_fd);
 void run_interactive_mode(void);
 void run_network_mode(int port);
 int add_rule(const char *rule);
-int check_connection(char *ip, int port);
+int check_connection(char *ip, int port, int *allowed_rule);
 int delete_rule(char *arg);
-void list_rules(void);
+void list_rules(int client_fd);
 int is_valid_rule(const char *rule);
 int is_valid_ip(const char *ip);
 int is_valid_port(int port);
 int is_ip_in_range(const char *ip_start, const char *ip_end, const char *ip);
 int is_port_in_range(int port_start, int port_end, int port);
 int ip_to_int(const char *ip_str, uint32_t *ip_out);
+void *client_handler(void *arg);
+void free_requests(void);
+void free_rules(void);
 
-void free_requests(void)
+void cleanup(int sig)
 {
-    RequestNode *current = request_head;
-    while (current != NULL)
-    {
-        RequestNode *next = current->next;
-        free(current);
-        current = next;
-    }
-    request_head = NULL;
-}
-
-void free_rules(void)
-{
-    RuleNode *current_rule = rule_head;
-    while (current_rule != NULL)
-    {
-        QueryNode *current_query = current_rule->queries;
-        while (current_query != NULL)
-        {
-            QueryNode *next_query = current_query->next;
-            free(current_query);
-            current_query = next_query;
-        }
-        RuleNode *next_rule = current_rule->next;
-        free(current_rule);
-        current_rule = next_rule;
-    }
-    rule_head = NULL;
+    free_requests();
+    free_rules();
+    exit(0);
 }
 
 int main(int argc, char **argv)
 {
+    signal(SIGINT, cleanup);
     if (argc != 2 || (strcmp(argv[1], "-i") != 0 && atoi(argv[1]) == 0))
     {
         printf("Usage: %s -i OR %s <port>\n", argv[0], argv[0]);
@@ -118,7 +107,14 @@ void run_interactive_mode(void)
             command[len - 1] = '\0';
         }
 
+        pthread_mutex_lock(&request_mutex);
         RequestNode *new_request = (RequestNode *)malloc(sizeof(RequestNode));
+        if (new_request == NULL)
+        {
+            perror("Failed to allocate memory for new request");
+            pthread_mutex_unlock(&request_mutex);
+            continue;
+        }
         strcpy(new_request->request, command);
         new_request->next = NULL;
 
@@ -135,18 +131,140 @@ void run_interactive_mode(void)
             }
             current->next = new_request;
         }
+        pthread_mutex_unlock(&request_mutex);
 
-        process_command(command);
+        process_command(command, -1); 
     }
 }
 
 void run_network_mode(int port)
 {
-    printf("Starting network mode on port %d\n", port);
-    // Network code would go here
+    int sockfd, newsockfd;
+    socklen_t clilen;
+    struct sockaddr_in serv_addr, cli_addr;
+    pthread_t tid;
+
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (sockfd < 0)
+    {
+        perror("ERROR opening socket");
+        exit(1);
+    }
+
+    int opt = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt)) < 0)
+    {
+        perror("ERROR on setsockopt");
+        close(sockfd);
+        exit(1);
+    }
+
+    bzero((char *)&serv_addr, sizeof(serv_addr));
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = INADDR_ANY;
+    serv_addr.sin_port = htons(port);
+
+    if (bind(sockfd, (struct sockaddr *)&serv_addr, sizeof(serv_addr)) < 0)
+    {
+        perror("ERROR on binding");
+        close(sockfd);
+        exit(1);
+    }
+
+    listen(sockfd, 5);
+    printf("Server listening on port %d\n", port);
+    clilen = sizeof(cli_addr);
+
+    while (1)
+    {
+        newsockfd = accept(sockfd, (struct sockaddr *)&cli_addr, &clilen);
+        if (newsockfd < 0)
+        {
+            perror("ERROR on accept");
+            continue;
+        }
+
+        int *pclient = malloc(sizeof(int));
+        if (pclient == NULL)
+        {
+            perror("Failed to allocate memory for client socket");
+            close(newsockfd);
+            continue;
+        }
+        *pclient = newsockfd;
+
+        if (pthread_create(&tid, NULL, client_handler, pclient) != 0)
+        {
+            perror("Failed to create thread");
+            free(pclient);
+            close(newsockfd);
+            continue;
+        }
+
+        pthread_detach(tid); 
+    }
+
+    close(sockfd);
 }
 
-void process_command(char *request)
+void *client_handler(void *arg)
+{
+    int client_fd = *((int *)arg);
+    free(arg);
+    char buffer[BUFFER_SIZE];
+    ssize_t n;
+
+    while (1)
+    {
+        bzero(buffer, BUFFER_SIZE);
+        n = read(client_fd, buffer, BUFFER_SIZE - 1);
+        if (n <= 0)
+        {
+            if (n < 0)
+                perror("ERROR reading from socket");
+            break;
+        }
+
+        size_t len = strlen(buffer);
+        if (len > 0 && buffer[len - 1] == '\n')
+        {
+            buffer[len - 1] = '\0';
+        }
+
+        pthread_mutex_lock(&request_mutex);
+        RequestNode *new_request = (RequestNode *)malloc(sizeof(RequestNode));
+        if (new_request == NULL)
+        {
+            perror("Failed to allocate memory for new request");
+            pthread_mutex_unlock(&request_mutex);
+            continue;
+        }
+        strcpy(new_request->request, buffer);
+        new_request->next = NULL;
+
+        if (request_head == NULL)
+        {
+            request_head = new_request;
+        }
+        else
+        {
+            RequestNode *current = request_head;
+            while (current->next != NULL)
+            {
+                current = current->next;
+            }
+            current->next = new_request;
+        }
+        pthread_mutex_unlock(&request_mutex);
+
+        process_command(buffer, client_fd);
+    }
+
+    close(client_fd);
+    return NULL;
+}
+
+void process_command(char *request, int client_fd)
 {
     if (request == NULL)
         return;
@@ -156,21 +274,33 @@ void process_command(char *request)
     switch (command)
     {
     case 'R':
-        list_requests();
+        list_requests(client_fd);
         break;
     case 'A':
         if (strlen(arg) == 0)
         {
-            printf("Illegal request\n");
+            if (client_fd == -1)
+                printf("Illegal request\n");
+            else
+                write(client_fd, "Illegal request\n", 16);
             break;
         }
+        pthread_mutex_lock(&rule_mutex);
         if (is_valid_rule(arg) && add_rule(arg) == 0)
         {
-            printf("Rule added\n");
+            pthread_mutex_unlock(&rule_mutex);
+            if (client_fd == -1)
+                printf("Rule added\n");
+            else
+                write(client_fd, "Rule added\n", 11);
         }
         else
         {
-            printf("Invalid rule\n");
+            pthread_mutex_unlock(&rule_mutex);
+            if (client_fd == -1)
+                printf("Invalid rule\n");
+            else
+                write(client_fd, "Invalid rule\n", 13);
         }
         break;
     case 'C':
@@ -179,55 +309,108 @@ void process_command(char *request)
         int port;
         if (sscanf(arg, "%s %d", ip, &port) != 2)
         {
-            printf("Illegal request\n");
+            if (client_fd == -1)
+                printf("Illegal request\n");
+            else
+                write(client_fd, "Illegal request\n", 16);
             break;
         }
 
-        int result = check_connection(ip, port);
+        int allowed_rule = -1;
+        int result = check_connection(ip, port, &allowed_rule);
         if (result == -1)
         {
-            printf("Illegal IP address or port specified\n");
+            if (client_fd == -1)
+                printf("Illegal IP address or port specified\n");
+            else
+                write(client_fd, "Illegal IP address or port specified\n", 37);
         }
         else if (result == 1)
         {
-            printf("Connection accepted\n");
+            if (client_fd == -1)
+                printf("Connection accepted\n");
+            else
+                write(client_fd, "Connection accepted\n", 20);
         }
         else
         {
-            printf("Connection rejected\n");
+            if (client_fd == -1)
+                printf("Connection rejected\n");
+            else
+                write(client_fd, "Connection rejected\n", 20);
         }
         break;
     }
     case 'D':
         if (strlen(arg) == 0)
         {
-            printf("Illegal request\n");
+            if (client_fd == -1)
+                printf("Illegal request\n");
+            else
+                write(client_fd, "Illegal request\n", 16);
             break;
         }
+        pthread_mutex_lock(&rule_mutex);
         if (is_valid_rule(arg) && delete_rule(arg))
         {
-            printf("Rule deleted\n");
+            pthread_mutex_unlock(&rule_mutex);
+            if (client_fd == -1)
+                printf("Rule deleted\n");
+            else
+                write(client_fd, "Rule deleted\n", 13);
         }
         else
         {
-            printf("Rule not found\n");
+            pthread_mutex_unlock(&rule_mutex);
+            if (is_valid_rule(arg))
+            {
+                if (client_fd == -1)
+                    printf("Rule not found\n");
+                else
+                    write(client_fd, "Rule not found\n", 15);
+            }
+            else
+            {
+                if (client_fd == -1)
+                    printf("Rule invalid\n");
+                else
+                    write(client_fd, "Rule invalid\n", 13);
+            }
         }
         break;
     case 'L':
-        list_rules();
+        list_rules(client_fd);
         break;
     default:
-        printf("Illegal request\n");
+        if (client_fd == -1)
+            printf("Illegal request\n");
+        else
+            write(client_fd, "Illegal request\n", 16);
     }
 }
 
-void list_requests(void)
+void list_requests(int client_fd)
 {
+    pthread_mutex_lock(&request_mutex);
     RequestNode *current = request_head;
+    char response[BUFFER_SIZE];
+    bzero(response, BUFFER_SIZE);
+
     while (current != NULL)
     {
-        printf("%s\n", current->request);
+        strncat(response, current->request, BUFFER_SIZE - strlen(response) - 2);
+        strncat(response, "\n", BUFFER_SIZE - strlen(response) - 1);
         current = current->next;
+    }
+    pthread_mutex_unlock(&request_mutex);
+
+    if (client_fd == -1)
+    {
+        printf("%s", response);
+    }
+    else
+    {
+        write(client_fd, response, strlen(response));
     }
 }
 
@@ -239,6 +422,8 @@ int add_rule(const char *rule)
 
     strcpy(new_rule->rule, rule);
     new_rule->queries = NULL;
+
+    // Insert at the beginning of the list
     new_rule->next = rule_head;
     rule_head = new_rule;
     return 0;
@@ -260,6 +445,15 @@ int delete_rule(char *rule)
             {
                 prev->next = current->next;
             }
+
+            QueryNode *q = current->queries;
+            while (q != NULL)
+            {
+                QueryNode *temp = q;
+                q = q->next;
+                free(temp);
+            }
+
             free(current);
             return 1;
         }
@@ -269,29 +463,50 @@ int delete_rule(char *rule)
     return 0;
 }
 
-void list_rules(void)
+void list_rules(int client_fd)
 {
+    pthread_mutex_lock(&rule_mutex);
     RuleNode *current = rule_head;
+    char response[BUFFER_SIZE * 10]; 
+    bzero(response, sizeof(response));
+
     while (current != NULL)
     {
-        printf("Rule: %s\n", current->rule);
-        QueryNode *query = current->queries;
-        while (query != NULL)
+        strcat(response, "Rule: ");
+        strcat(response, current->rule);
+        strcat(response, "\n");
+
+        QueryNode *q = current->queries;
+        while (q != NULL)
         {
-            printf("Query: %s\n", query->query);
-            query = query->next;
+            strcat(response, "Query: ");
+            strcat(response, q->query);
+            strcat(response, "\n");
+            q = q->next;
         }
+
         current = current->next;
+    }
+    pthread_mutex_unlock(&rule_mutex);
+
+    if (client_fd == -1)
+    {
+        printf("%s", response);
+    }
+    else
+    {
+        write(client_fd, response, strlen(response));
     }
 }
 
-int check_connection(char *ip, int port)
+int check_connection(char *ip, int port, int *allowed_rule)
 {
     if (!is_valid_ip(ip) || !is_valid_port(port))
     {
         return -1;
     }
 
+    pthread_mutex_lock(&rule_mutex);
     RuleNode *current = rule_head;
     while (current != NULL)
     {
@@ -330,15 +545,27 @@ int check_connection(char *ip, int port)
 
         if (port_match)
         {
+
             QueryNode *new_query = (QueryNode *)malloc(sizeof(QueryNode));
+            if (new_query == NULL)
+            {
+                perror("Failed to allocate memory for new query");
+                pthread_mutex_unlock(&rule_mutex);
+                return 0; 
+            }
             snprintf(new_query->query, sizeof(new_query->query), "%s %d", ip, port);
             new_query->next = current->queries;
             current->queries = new_query;
+
+            if (allowed_rule != NULL)
+                *allowed_rule = 1;
+
+            pthread_mutex_unlock(&rule_mutex);
             return 1;
         }
         current = current->next;
     }
-
+    pthread_mutex_unlock(&rule_mutex);
     return 0;
 }
 
@@ -436,9 +663,46 @@ int is_valid_rule(const char *rule)
             return 0;
         }
     }
-    else if (!is_valid_port(atoi(port_range)))
+    else
     {
-        return 0;
+        int port = atoi(port_range);
+        if (!is_valid_port(port))
+            return 0;
     }
     return 1;
+}
+
+void free_requests(void)
+{
+    pthread_mutex_lock(&request_mutex);
+    RequestNode *current = request_head;
+    while (current != NULL)
+    {
+        RequestNode *next = current->next;
+        free(current);
+        current = next;
+    }
+    request_head = NULL;
+    pthread_mutex_unlock(&request_mutex);
+}
+
+void free_rules(void)
+{
+    pthread_mutex_lock(&rule_mutex);
+    RuleNode *current_rule = rule_head;
+    while (current_rule != NULL)
+    {
+        QueryNode *current_query = current_rule->queries;
+        while (current_query != NULL)
+        {
+            QueryNode *next_query = current_query->next;
+            free(current_query);
+            current_query = next_query;
+        }
+        RuleNode *next_rule = current_rule->next;
+        free(current_rule);
+        current_rule = next_rule;
+    }
+    rule_head = NULL;
+    pthread_mutex_unlock(&rule_mutex);
 }
