@@ -10,7 +10,8 @@
 #include <netinet/in.h>
 #include <signal.h>
 
-#define BUFFER_SIZE 1024
+// TODO : FIX THIS make it dynamic
+#define BUFFER_SIZE 10000
 
 typedef struct QueryNode
 {
@@ -133,7 +134,7 @@ void run_interactive_mode(void)
         }
         pthread_mutex_unlock(&request_mutex);
 
-        process_command(command, -1); 
+        process_command(command, -1);
     }
 }
 
@@ -201,7 +202,7 @@ void run_network_mode(int port)
             continue;
         }
 
-        pthread_detach(tid); 
+        pthread_detach(tid);
     }
 
     close(sockfd);
@@ -423,7 +424,6 @@ int add_rule(const char *rule)
     strcpy(new_rule->rule, rule);
     new_rule->queries = NULL;
 
-    // Insert at the beginning of the list
     new_rule->next = rule_head;
     rule_head = new_rule;
     return 0;
@@ -467,21 +467,21 @@ void list_rules(int client_fd)
 {
     pthread_mutex_lock(&rule_mutex);
     RuleNode *current = rule_head;
-    char response[BUFFER_SIZE * 10]; 
+    char response[BUFFER_SIZE * 10];
     bzero(response, sizeof(response));
 
     while (current != NULL)
     {
-        strcat(response, "Rule: ");
-        strcat(response, current->rule);
-        strcat(response, "\n");
+        char rule_response[BUFFER_SIZE];
+        snprintf(rule_response, sizeof(rule_response), "Rule: %s\n", current->rule);
+        strcat(response, rule_response);
 
         QueryNode *q = current->queries;
         while (q != NULL)
         {
-            strcat(response, "Query: ");
-            strcat(response, q->query);
-            strcat(response, "\n");
+            char query_response[BUFFER_SIZE];
+            snprintf(query_response, sizeof(query_response), "Query: %s\n", q->query);
+            strcat(response, query_response);
             q = q->next;
         }
 
@@ -545,17 +545,42 @@ int check_connection(char *ip, int port, int *allowed_rule)
 
         if (port_match)
         {
+            QueryNode *existing_query = current->queries;
+            QueryNode *prev = NULL;
+            int query_exists = 0;
+            char query_str[256];
+            snprintf(query_str, sizeof(query_str), "%s %d", ip, port);
 
-            QueryNode *new_query = (QueryNode *)malloc(sizeof(QueryNode));
-            if (new_query == NULL)
+            while (existing_query != NULL)
             {
-                perror("Failed to allocate memory for new query");
-                pthread_mutex_unlock(&rule_mutex);
-                return 0; 
+                if (strcmp(existing_query->query, query_str) == 0)
+                {
+                    query_exists = 1;
+                    if (prev != NULL)
+                    {
+                        prev->next = existing_query->next;
+                        existing_query->next = current->queries;
+                        current->queries = existing_query;
+                    }
+                    break;
+                }
+                prev = existing_query;
+                existing_query = existing_query->next;
             }
-            snprintf(new_query->query, sizeof(new_query->query), "%s %d", ip, port);
-            new_query->next = current->queries;
-            current->queries = new_query;
+
+            if (!query_exists)
+            {
+                QueryNode *new_query = (QueryNode *)malloc(sizeof(QueryNode));
+                if (new_query == NULL)
+                {
+                    perror("Failed to allocate memory for new query");
+                    pthread_mutex_unlock(&rule_mutex);
+                    return 0;
+                }
+                strcpy(new_query->query, query_str);
+                new_query->next = current->queries;
+                current->queries = new_query;
+            }
 
             if (allowed_rule != NULL)
                 *allowed_rule = 1;
