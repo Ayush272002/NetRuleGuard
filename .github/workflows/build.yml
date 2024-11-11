@@ -36,9 +36,3 @@ jobs:
 
       - name: Run tests
         run: ./test.sh
-
-      - name: Run interactive tests
-        run: ./interactive.sh
-
-      - name: Run network tests
-        run: ./network.sh

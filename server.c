@@ -10,8 +10,7 @@
 #include <netinet/in.h>
 #include <signal.h>
 
-// TODO : FIX THIS make it dynamic
-#define BUFFER_SIZE 10000
+#define BUFFER_SIZE 1024
 
 typedef struct QueryNode
 {
@@ -57,6 +56,86 @@ int ip_to_int(const char *ip_str, uint32_t *ip_out);
 void *client_handler(void *arg);
 void free_requests(void);
 void free_rules(void);
+
+void strip_leading_zeros(char *rule)
+{
+    char *ip = strtok(rule, " ");
+    char *port = strtok(NULL, " ");
+    char result[512] = ""; // Increased buffer size
+
+    // Process IP address or IP range
+    char *token;
+    char ip_result[256] = "";
+    char *delim = ".";
+    char *range_delim = "-";
+    char *ip_start = strtok(ip, range_delim);
+    char *ip_end = strtok(NULL, range_delim);
+
+    // Process start of IP range or single IP
+    token = strtok(ip_start, delim);
+    while (token != NULL)
+    {
+        // Remove leading zeros
+        while (*token == '0' && *(token + 1) != '\0')
+        {
+            token++;
+        }
+        strcat(ip_result, token);
+        token = strtok(NULL, delim);
+        if (token != NULL)
+        {
+            strcat(ip_result, ".");
+        }
+    }
+
+    if (ip_end != NULL)
+    {
+        strcat(ip_result, "-");
+        // Process end of IP range
+        token = strtok(ip_end, delim);
+        while (token != NULL)
+        {
+            // Remove leading zeros
+            while (*token == '0' && *(token + 1) != '\0')
+            {
+                token++;
+            }
+            strcat(ip_result, token);
+            token = strtok(NULL, delim);
+            if (token != NULL)
+            {
+                strcat(ip_result, ".");
+            }
+        }
+    }
+
+    // Process port or port range
+    char port_result[256] = "";
+    char *port_start = strtok(port, range_delim);
+    char *port_end = strtok(NULL, range_delim);
+
+    // Remove leading zeros from start of port range or single port
+    while (*port_start == '0' && *(port_start + 1) != '\0')
+    {
+        port_start++;
+    }
+    strcat(port_result, port_start);
+
+    if (port_end != NULL)
+    {
+        strcat(port_result, "-");
+        // Remove leading zeros from end of port range
+        while (*port_end == '0' && *(port_end + 1) != '\0')
+        {
+            port_end++;
+        }
+        strcat(port_result, port_end);
+    }
+
+    // Combine IP and port results
+    snprintf(result, sizeof(result), "%s %s", ip_result, port_result);
+    strcpy(rule, result);
+}
 
 void cleanup(int sig)
 {
@@ -173,7 +252,7 @@ void run_network_mode(int port)
     }
 
     listen(sockfd, 5);
-    printf("Server listening on port %d\n", port);
+    // printf("Server listening on port %d\n", port);
     clilen = sizeof(cli_addr);
 
     while (1)
@@ -421,9 +500,15 @@ int add_rule(const char *rule)
     if (new_rule == NULL)
         return -1;
 
-    strcpy(new_rule->rule, rule);
+    char rule_copy[256];
+    strcpy(rule_copy, rule);
+
+    strip_leading_zeros(rule_copy);
+
+    strcpy(new_rule->rule, rule_copy);
     new_rule->queries = NULL;
 
+    // Insert at the beginning of the list
     new_rule->next = rule_head;
     rule_head = new_rule;
     return 0;
@@ -472,16 +557,16 @@ void list_rules(int client_fd)
 
     while (current != NULL)
     {
-        char rule_response[BUFFER_SIZE];
-        snprintf(rule_response, sizeof(rule_response), "Rule: %s\n", current->rule);
-        strcat(response, rule_response);
+        strcat(response, "Rule: ");
+        strcat(response, current->rule);
+        strcat(response, "\n");
 
         QueryNode *q = current->queries;
         while (q != NULL)
         {
-            char query_response[BUFFER_SIZE];
-            snprintf(query_response, sizeof(query_response), "Query: %s\n", q->query);
-            strcat(response, query_response);
+            strcat(response, "Query: ");
+            strcat(response, q->query);
+            strcat(response, "\n");
             q = q->next;
         }
 
@@ -499,12 +584,46 @@ void list_rules(int client_fd)
     }
 }
 
+void strip_leading_zeros2(char *ip, char *port)
+{
+    // Process IP address
+    char *token;
+    char ip_result[16] = "";
+    char *delim = ".";
+    token = strtok(ip, delim);
+    while (token != NULL)
+    {
+        // Remove leading zeros
+        while (*token == '0' && *(token + 1) != '\0')
+        {
+            token++;
+        }
+        strcat(ip_result, token);
+        token = strtok(NULL, delim);
+        if (token != NULL)
+        {
+            strcat(ip_result, ".");
+        }
+    }
+    strcpy(ip, ip_result);
+
+    // Process port
+    while (*port == '0' && *(port + 1) != '\0')
+    {
+        port++;
+    }
+}
+
 int check_connection(char *ip, int port, int *allowed_rule)
 {
     if (!is_valid_ip(ip) || !is_valid_port(port))
     {
         return -1;
     }
+
+    char port_str[6];
+    snprintf(port_str, sizeof(port_str), "%d", port);
+    strip_leading_zeros2(ip, port_str);
 
     pthread_mutex_lock(&rule_mutex);
     RuleNode *current = rule_head;
@@ -545,42 +664,17 @@ int check_connection(char *ip, int port, int *allowed_rule)
 
         if (port_match)
         {
-            QueryNode *existing_query = current->queries;
-            QueryNode *prev = NULL;
-            int query_exists = 0;
-            char query_str[256];
-            snprintf(query_str, sizeof(query_str), "%s %d", ip, port);
 
-            while (existing_query != NULL)
+            QueryNode *new_query = (QueryNode *)malloc(sizeof(QueryNode));
+            if (new_query == NULL)
             {
-                if (strcmp(existing_query->query, query_str) == 0)
-                {
-                    query_exists = 1;
-                    if (prev != NULL)
-                    {
-                        prev->next = existing_query->next;
-                        existing_query->next = current->queries;
-                        current->queries = existing_query;
-                    }
-                    break;
-                }
-                prev = existing_query;
-                existing_query = existing_query->next;
+                perror("Failed to allocate memory for new query");
+                pthread_mutex_unlock(&rule_mutex);
+                return 0;
             }
-
-            if (!query_exists)
-            {
-                QueryNode *new_query = (QueryNode *)malloc(sizeof(QueryNode));
-                if (new_query == NULL)
-                {
-                    perror("Failed to allocate memory for new query");
-                    pthread_mutex_unlock(&rule_mutex);
-                    return 0;
-                }
-                strcpy(new_query->query, query_str);
-                new_query->next = current->queries;
-                current->queries = new_query;
-            }
+            snprintf(new_query->query, sizeof(new_query->query), "%s %d", ip, port);
+            new_query->next = current->queries;
+            current->queries = new_query;
 
             if (allowed_rule != NULL)
                 *allowed_rule = 1;
